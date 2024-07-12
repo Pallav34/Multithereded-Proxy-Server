@@ -146,7 +146,7 @@ int handle_request(int clientSocket,ParsedRequest *request, char *tempReq){
     strcpy(buf,"GET ");
     strcat(buf,request->path);
     strcat(buf," ");
-    strcar(buf, request->version);
+    strcat(buf, request->version);
     strcat(buf,"\r\n");
 
     size_t len = strlen(buf);
@@ -159,6 +159,60 @@ int handle_request(int clientSocket,ParsedRequest *request, char *tempReq){
             printf("Set \"Host\" header key not working\n");
         }
     }
+    if (ParsedRequest_unparse_headers(request, buf + len, (size_t)MAX_BYTES - len) < 0) {
+		printf("unparse failed\n");
+		//return -1;				// If this happens Still try to send request without header
+	}
+
+	int server_port = 80;				// Default Remote Server Port
+	if(request->port != NULL)
+		server_port = atoi(request->port);
+
+	int remoteSocketID = connectRemoteServer(request->host, server_port);
+
+	if(remoteSocketID < 0)
+		return -1;
+
+	int bytes_send = send(remoteSocketID, buf, strlen(buf), 0);
+
+	bzero(buf, MAX_BYTES);
+
+	bytes_send = recv(remoteSocketID, buf, MAX_BYTES-1, 0);
+	char *temp_buffer = (char*)malloc(sizeof(char)*MAX_BYTES); //temp buffer
+	int temp_buffer_size = MAX_BYTES;
+	int temp_buffer_index = 0;
+
+	while(bytes_send > 0)
+	{
+		bytes_send = send(clientSocket, buf, bytes_send, 0);
+		
+		for(int i=0;i<bytes_send/sizeof(char);i++){
+			temp_buffer[temp_buffer_index] = buf[i];
+			// printf("%c",buf[i]); // Response Printing
+			temp_buffer_index++;
+		}
+		temp_buffer_size += MAX_BYTES;
+		temp_buffer=(char*)realloc(temp_buffer,temp_buffer_size);
+
+		if(bytes_send < 0)
+		{
+			perror("Error in sending data to client socket.\n");
+			break;
+		}
+		bzero(buf, MAX_BYTES);
+
+		bytes_send = recv(remoteSocketID, buf, MAX_BYTES-1, 0);
+
+	} 
+	temp_buffer[temp_buffer_index]='\0';
+	free(buf);
+	add_cache_element(temp_buffer, strlen(temp_buffer), tempReq);
+	printf("Done\n");
+	free(temp_buffer);
+	
+	
+ 	close(remoteSocketID);
+	return 0;
 }
 
 int checkHTTPversion(char *msg){
@@ -173,7 +227,7 @@ int checkHTTPversion(char *msg){
 }
 
 void* thread_fn(void* socketNew){
-    //decrements (locks) the semaphore
+    //decrements (locks) the semaphore and checks the value of the semaphore if the value of semaphore is -ve then it is wait untill the value is +ve
     sem_wait(&seamaphore);
     int p;
     //retrieves the current value and store in P
@@ -184,7 +238,7 @@ void* thread_fn(void* socketNew){
     int* t = (int*)(socketNew);
     int socket = *t; //socket is socket descriptor of the connected client
 
-  
+   //bytes send to the client
     int bytes_send_client, len; //bytes transferred
       //buffer allocation
       //creating buffer of 4kb for a client
@@ -198,6 +252,7 @@ void* thread_fn(void* socketNew){
         len = strlen(buffer);
         //Checks if the HTTP header termination sequence (\r\n\r\n) is in the buffer. If not, it continues to receive more data.
         if(strstr(buffer, "\r\n\r\n")==NULL){
+            //recv (socket, start, end, 0);
             bytes_send_client=recv(socket,buffer+len, MAX_BYTES-len,0);
         }
         else {
@@ -207,6 +262,7 @@ void* thread_fn(void* socketNew){
       printf("--------------------------------------------\n");
 	printf("%s\n",buffer);
 	printf("----------------------%d----------------------\n",strlen(buffer));
+    //copy of req (array)
     char * tempReq = (char*)malloc(strlen(buffer)*sizeof(char)+1);
 
     //tempreq, buffer both store the http req sent by the client
@@ -233,6 +289,7 @@ void* thread_fn(void* socketNew){
 		printf("%s\n\n",response);
     }
     //NOT UNDERSTOOD WHY DONE
+    //No element in cache
     	else if (bytes_send_client > 0)
 	{
 		len = strlen(buffer);
@@ -250,6 +307,7 @@ void* thread_fn(void* socketNew){
 				if (request->host && request->path && (checkHTTPversion(request->version) == 1))
 				{
 					bytes_send_client = handle_request(socket, request, tempReq);
+                    //if nothing comes from server
 					if (bytes_send_client == -1)
 					{
 						sendErrorMessage(socket, 500);
@@ -270,6 +328,8 @@ void* thread_fn(void* socketNew){
 	{
 		perror("Error in receiving from client.\n");
 	}
+
+    //if no req from client, means client is disconnected
 	else if(bytes_send_client == 0)
 	{
 		printf("Client disconnected!\n");
@@ -284,10 +344,6 @@ void* thread_fn(void* socketNew){
 	printf("Semaphore post value:%d\n", p);
 	free(tempReq);
 	return NULL;
-
-
-
-
 }
 
 int main(int argc, char *argv[]){
@@ -360,7 +416,7 @@ int main(int argc, char *argv[]){
         struct sockaddr_in* client_pt=(struct sockaddr_in*)&client_addr;
         struct in_addr ip_addr=client_pt->sin_addr;
         char str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET,&ip_addr,INET_ADDRSTRLEN);
+        inet_ntop(AF_INET,&ip_addr,str, INET_ADDRSTRLEN);
         printf("Client is connected with port number: %d and ip address: %s \n",ntohs(client_addr.sin_port),str);
 
         //creating a new thread
@@ -402,28 +458,43 @@ cache_element* find(char*url){
     printf("Find cache Lock Unlocked %d\n",temp_lock_val);
     return site;
 }
+void remove_cache_element() {
+    // If cache is not empty, search for the node with the least lru_time_track and delete it
+    cache_element *prev = NULL;   // Pointer to the previous element
+    cache_element *current = head;  // Pointer to the current element
+    cache_element *least_used = head;  // Pointer to the least used element
+    cache_element *least_used_prev = NULL;  // Pointer to the element before the least used element
 
-void remove_cache_element(){
-    //If cache is not empty searches for the node which has the least lru_time_track and deletes it.
-    cache_element * prev; //prev pointer
-    cache_element * curr; //to be removed
-    cache_element * min;
+    pthread_mutex_lock(&lock);
+    printf("Remove Cache Lock Acquired\n");
 
-    int temp_lock_val = pthread_mutex_lock(&lock);
-    printf("Remove Cache Lock Acquired %d\n",temp_lock_val);
-    if(head!=NULL && head->next!=NULL){ //cache! empty
-    prev=NULL;
-    curr=head->next;
-    min = head;
-     while(curr->next !=NULL){
-        if((curr->lru_time_track)<(min->lru_time_track)){
-            min=curr;
+    // Traverse the cache to find the least recently used element
+    while (current != NULL) {
+        if (current->lru_time_track < least_used->lru_time_track) {
+            least_used = current;
+            least_used_prev = prev;
         }
-        prev=curr;
-        curr=curr->next;
-     }
+        prev = current;
+        current = current->next;
     }
 
+    // Remove the least recently used element
+    if (least_used == head) {
+        head = head->next;  // Handle the base case where the head is the least used
+    } else if (least_used_prev != NULL) {
+        least_used_prev->next = least_used->next;  // Bypass the least used element
+    }
+
+    // Update cache size
+    cache_size -= (least_used->len + sizeof(cache_element) + strlen(least_used->url) + 1);
+
+    // Free the removed element's data
+    free(least_used->data);
+    free(least_used->url);
+    free(least_used);
+
+    pthread_mutex_unlock(&lock);
+    printf("Remove Cache Lock Unlocked\n");
 }
 
 int add_cache_element(char* data,int size,char* url){
