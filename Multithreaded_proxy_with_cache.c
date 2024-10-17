@@ -516,9 +516,13 @@ int add_cache_element(char* data,int size,char* url){
         remove_cache_element();
         }
         cache_element* element = (cache_element*) malloc(sizeof(cache_element));
+        //added
+        element->url = strdup(url);
 
         element->data = (char*)malloc(size+1);
-        strcpy(element->url,url);
+        //strcpy(element->url,url);
+        //added and above commented
+        element->url = strdup(url);
         element->lru_time_track=time(NULL);
         element->next=head;
         element->len=size;
